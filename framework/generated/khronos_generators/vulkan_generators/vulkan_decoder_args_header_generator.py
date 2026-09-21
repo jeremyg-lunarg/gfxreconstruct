@@ -66,7 +66,6 @@ class VulkanDecoderArgsHeaderGeneratorOptions(VulkanBaseGeneratorOptions):
             'generated/generated_vulkan_struct_decoders.h',
             'util/defines.h',
         ))
-        self.begin_end_file_data.system_headers.append('tuple')
         self.begin_end_file_data.namespaces.extend(('gfxrecon', 'decode', 'args'))
 
         self.begin_end_file_data.pre_namespace_code.extend((
@@ -121,14 +120,6 @@ class VulkanDecoderArgsHeaderGenerator(
             for param in params:
                 decoded_type = self.make_decoded_param_type(param)
                 body += f"    {decoded_type} {param.name};\n"
-
-            body += "\n    auto GetTuple() const { return std::tie("
-            if return_type and return_type != 'void':
-                body += "result, "
-            for param in params:
-                body += f"{param.name}, "
-            body = body[:-2]  # Remove the trailing comma and space.
-            body += "); }\n"
 
             body += "};\n"
 
