@@ -496,6 +496,14 @@ VkImageAspectFlags GetFormatAspects(VkFormat format);
 
 VkFormat GetImageAspectFormat(VkFormat format, VkImageAspectFlagBits aspect);
 
+// VkFlags overloads of the two functions above, for callers built against a
+// header set (Vulkan SC) where VkImageAspectFlagBits is a VkFlags typedef, not
+// the enum this header declares it as: the two types mangle differently, so a
+// declaration using the enum type does not link against a caller compiled
+// under the other header set.
+void     GetFormatAspects(VkFormat format, std::vector<VkFlags>* aspects, bool* combined_depth_stencil = nullptr);
+VkFormat GetImageAspectFormat(VkFormat format, VkFlags aspect);
+
 bool FindMemoryTypeIndex(const VkPhysicalDeviceMemoryProperties& memory_properties,
                          uint32_t                                memory_type_bits,
                          VkMemoryPropertyFlags                   desired_flags,

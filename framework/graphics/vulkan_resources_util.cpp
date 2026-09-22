@@ -365,6 +365,20 @@ VkFormat GetImageAspectFormat(VkFormat format, VkImageAspectFlagBits aspect)
     }
 }
 
+void GetFormatAspects(VkFormat format, std::vector<VkFlags>* aspects, bool* combined_depth_stencil)
+{
+    GFXRECON_ASSERT(aspects != nullptr);
+
+    std::vector<VkImageAspectFlagBits> aspect_bits;
+    GetFormatAspects(format, &aspect_bits, combined_depth_stencil);
+    aspects->assign(aspect_bits.begin(), aspect_bits.end());
+}
+
+VkFormat GetImageAspectFormat(VkFormat format, VkFlags aspect)
+{
+    return GetImageAspectFormat(format, static_cast<VkImageAspectFlagBits>(aspect));
+}
+
 bool FindMemoryTypeIndex(const VkPhysicalDeviceMemoryProperties& memory_properties,
                          uint32_t                                memory_type_bits,
                          VkMemoryPropertyFlags                   desired_flags,
