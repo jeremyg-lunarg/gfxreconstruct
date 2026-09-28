@@ -30,6 +30,7 @@
 #include "encode/vulkan_capture_layer_settings.h"
 #include "encode/vulkan_handle_wrapper_util.h"
 #include "encode/vulkan_handle_wrappers.h"
+#include "encode/vulkan_state_info.h"
 #include "format/format.h"
 #include "format/format_util.h"
 
@@ -826,4 +827,108 @@ TEST_CASE("VkLayerSettingsCreateInfoEXT is parsed correctly", "[capture_layer_se
     REQUIRE(layer_settings.capture_file == "my_capture.gfxr");
 
     gfxrecon::util::Log::Release();
+}
+
+TEST_CASE("Queue family ownership releases are held until their acquire", "[state_tracking]")
+{
+    using gfxrecon::encode::vulkan_state_info::ApplyQueueFamilyOwnershipTransfer;
+    using gfxrecon::encode::vulkan_state_info::IsQueueFamilyOwnershipTransfer;
+    using gfxrecon::encode::vulkan_state_info::QueueFamilyOwnershipTransfer;
+
+    const uint32_t kGraphics = 0;
+    const uint32_t kCompute  = 2;
+
+    SECTION("Only transfers between two of the device's queue families count")
+    {
+        REQUIRE(IsQueueFamilyOwnershipTransfer(kGraphics, kCompute));
+        REQUIRE_FALSE(IsQueueFamilyOwnershipTransfer(kGraphics, kGraphics));
+        REQUIRE_FALSE(IsQueueFamilyOwnershipTransfer(VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED));
+        REQUIRE_FALSE(IsQueueFamilyOwnershipTransfer(kGraphics, VK_QUEUE_FAMILY_IGNORED));
+        REQUIRE_FALSE(IsQueueFamilyOwnershipTransfer(VK_QUEUE_FAMILY_EXTERNAL, kCompute));
+        REQUIRE_FALSE(IsQueueFamilyOwnershipTransfer(kGraphics, VK_QUEUE_FAMILY_FOREIGN_EXT));
+    }
+
+    QueueFamilyOwnershipTransfer to_compute;
+    to_compute.src_queue_family_index = kGraphics;
+    to_compute.dst_queue_family_index = kCompute;
+    to_compute.offset                 = 0;
+    to_compute.size                   = VK_WHOLE_SIZE;
+
+    QueueFamilyOwnershipTransfer to_graphics = to_compute;
+    to_graphics.src_queue_family_index       = kCompute;
+    to_graphics.dst_queue_family_index       = kGraphics;
+
+    std::vector<QueueFamilyOwnershipTransfer> pending;
+
+    SECTION("A matching acquire completes a release")
+    {
+        ApplyQueueFamilyOwnershipTransfer(pending, to_compute, true);
+        REQUIRE(pending.size() == 1);
+
+        ApplyQueueFamilyOwnershipTransfer(pending, to_compute, false);
+        REQUIRE(pending.empty());
+    }
+
+    SECTION("Releasing the same range twice leaves one pending release")
+    {
+        ApplyQueueFamilyOwnershipTransfer(pending, to_compute, true);
+        ApplyQueueFamilyOwnershipTransfer(pending, to_compute, true);
+        REQUIRE(pending.size() == 1);
+    }
+
+    SECTION("An acquire with other parameters leaves the release pending")
+    {
+        ApplyQueueFamilyOwnershipTransfer(pending, to_compute, true);
+
+        QueueFamilyOwnershipTransfer other_range = to_compute;
+        other_range.size                         = 256;
+        ApplyQueueFamilyOwnershipTransfer(pending, other_range, false);
+        ApplyQueueFamilyOwnershipTransfer(pending, to_graphics, false);
+
+        REQUIRE(pending.size() == 1);
+        REQUIRE(pending[0] == to_compute);
+    }
+
+    SECTION("A frame's round trip leaves the last release pending")
+    {
+        // The first release, recorded before the first frame.
+        ApplyQueueFamilyOwnershipTransfer(pending, to_compute, true);
+
+        for (uint32_t frame = 0; frame < 3; ++frame)
+        {
+            // Compute acquires, dispatches, and gives it back; graphics acquires, draws, and releases it again.
+            ApplyQueueFamilyOwnershipTransfer(pending, to_compute, false);
+            ApplyQueueFamilyOwnershipTransfer(pending, to_graphics, true);
+            ApplyQueueFamilyOwnershipTransfer(pending, to_graphics, false);
+            ApplyQueueFamilyOwnershipTransfer(pending, to_compute, true);
+        }
+
+        REQUIRE(pending.size() == 1);
+        REQUIRE(pending[0] == to_compute);
+    }
+
+    SECTION("Image transfers match on layouts and subresource range")
+    {
+        QueueFamilyOwnershipTransfer image_release;
+        image_release.src_queue_family_index = kGraphics;
+        image_release.dst_queue_family_index = kCompute;
+        image_release.old_layout             = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        image_release.new_layout             = VK_IMAGE_LAYOUT_GENERAL;
+        image_release.subresource_range      = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+        ApplyQueueFamilyOwnershipTransfer(pending, image_release, true);
+
+        QueueFamilyOwnershipTransfer other_layout = image_release;
+        other_layout.old_layout                   = VK_IMAGE_LAYOUT_GENERAL;
+        ApplyQueueFamilyOwnershipTransfer(pending, other_layout, false);
+
+        QueueFamilyOwnershipTransfer other_level   = image_release;
+        other_level.subresource_range.baseMipLevel = 1;
+        ApplyQueueFamilyOwnershipTransfer(pending, other_level, false);
+
+        REQUIRE(pending.size() == 1);
+
+        ApplyQueueFamilyOwnershipTransfer(pending, image_release, false);
+        REQUIRE(pending.empty());
+    }
 }
