@@ -191,6 +191,10 @@ bool FileTransformer::Process()
                 block_index_++;
             }
         }
+        else if (status != kEndOfFile)
+        {
+            HandleBlockReadError(status, "Failed to read next block");
+        }
     }
 
     if (!success && (error_state_ == kErrorNone))

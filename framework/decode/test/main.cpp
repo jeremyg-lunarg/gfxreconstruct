@@ -40,8 +40,12 @@
 #include "decode/block_parser.h"
 #include "decode/custom_vulkan_struct_decoders.h"
 #include "decode/decode_allocator.h"
+#include "decode/file_transformer.h"
 #include "decode/vulkan_pnext_node.h"
 
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <vector>
 
@@ -177,6 +181,101 @@ TEST_CASE("BlockParser basic usage", "[wrapper]")
     // this should trigger some error
     block_parser.HandleBlockReadError(gfxrecon::decode::BlockIOError::kErrorReadingBlockData, "fatal fake error");
     REQUIRE(err_triggered);
+}
+
+namespace
+{
+
+// Writes a capture holding one block that the parser does not know, with `written` of its 16 payload bytes.
+void WriteOneBlockCapture(const std::filesystem::path& path, size_t written)
+{
+    const gfxrecon::format::FileHeader file_header{
+        GFXRECON_FOURCC, GFXRECON_CURRENT_FILE_MAJOR, GFXRECON_CURRENT_FILE_MINOR, 0
+    };
+    const gfxrecon::format::BlockHeader block_header{ 16, gfxrecon::format::BlockType::kUnknownBlock };
+    const std::vector<uint8_t>          payload(16, 0xab);
+
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file.write(reinterpret_cast<const char*>(&file_header), sizeof(file_header));
+    file.write(reinterpret_cast<const char*>(&block_header), sizeof(block_header));
+    file.write(reinterpret_cast<const char*>(payload.data()), written);
+}
+
+// Writes the bytes a capture starts with: a file header and the first `written` bytes of a block header.
+void WriteCutBlockHeaderCapture(const std::filesystem::path& path, size_t written)
+{
+    const gfxrecon::format::FileHeader file_header{
+        GFXRECON_FOURCC, GFXRECON_CURRENT_FILE_MAJOR, GFXRECON_CURRENT_FILE_MINOR, 0
+    };
+    const gfxrecon::format::BlockHeader block_header{ 16, gfxrecon::format::BlockType::kUnknownBlock };
+
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file.write(reinterpret_cast<const char*>(&file_header), sizeof(file_header));
+    file.write(reinterpret_cast<const char*>(&block_header), written);
+}
+
+// Runs a FileTransformer over `input` and returns what it logged at warning severity and above.
+std::string TransformAndCollectLog(const std::filesystem::path& input, bool* processed)
+{
+    auto&                       log_manager = gfxrecon::util::logging::LoggingManager::GetSingleton();
+    const std::filesystem::path log_path    = input.string() + ".log";
+
+    // Log::Init resets the file target, so it goes first. The file is closed after each message, so it can be read and
+    // removed below.
+    gfxrecon::util::Log::Init(gfxrecon::util::LoggingSeverity::kWarning);
+    log_manager.UpdateFileTarget(true, log_path.string(), true, false, true);
+    {
+        gfxrecon::decode::FileTransformer transformer;
+        REQUIRE(transformer.Initialize(input.string(), input.string() + ".out"));
+        *processed = transformer.Process();
+        CHECK(transformer.GetErrorState() == gfxrecon::decode::kErrorNone);
+    }
+    log_manager.UpdateFileTarget(false, "", false, false, false);
+    gfxrecon::util::Log::Init(gfxrecon::util::LoggingSeverity::kError);
+
+    std::string log;
+    {
+        std::ifstream log_file(log_path);
+        log.assign(std::istreambuf_iterator<char>(log_file), std::istreambuf_iterator<char>());
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove(input, ignored);
+    std::filesystem::remove(input.string() + ".out", ignored);
+    std::filesystem::remove(log_path, ignored);
+    return log;
+}
+
+} // namespace
+
+TEST_CASE("FileTransformer warns about a capture whose last block is cut short", "[file_transformer]")
+{
+    const std::filesystem::path dir       = std::filesystem::temp_directory_path();
+    bool                        processed = false;
+
+    SECTION("a complete block is passed through without the warning")
+    {
+        const std::filesystem::path input = dir / "file_transformer_complete.gfxr";
+        WriteOneBlockCapture(input, 16);
+        CHECK(TransformAndCollectLog(input, &processed).find("Incomplete block") == std::string::npos);
+        CHECK(processed);
+    }
+
+    SECTION("a block cut short in its payload")
+    {
+        const std::filesystem::path input = dir / "file_transformer_cut_payload.gfxr";
+        WriteOneBlockCapture(input, 5);
+        CHECK(TransformAndCollectLog(input, &processed).find("Incomplete block at end of file") != std::string::npos);
+        CHECK(processed);
+    }
+
+    SECTION("a block cut short in its header")
+    {
+        const std::filesystem::path input = dir / "file_transformer_cut_header.gfxr";
+        WriteCutBlockHeaderCapture(input, 6);
+        CHECK(TransformAndCollectLog(input, &processed).find("Incomplete block at end of file") != std::string::npos);
+        CHECK(processed);
+    }
 }
 
 TEST_CASE("Test a roundtrip between SubmitInfo2Translator and SubmitInfoTranslator", "[]")
